@@ -1,0 +1,84 @@
+name: CI/CD pipeline for multiplatform Nodejs
+
+on:
+ 
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+   inputs:
+    deploy_env:
+     description: ' Environment to deploy (production/stage) '
+     required: true
+     default: 'production'
+
+jobs:
+  
+  test:
+    name: Run tests on multiple os
+    runs-on: ${{ matrix.os }}
+    strategy:
+     matrix:
+      os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+     - name: Checkout code
+       uses: actions/checkout@v3
+     - name: Setup Node.js
+       uses: actions/setup-node@v3
+       with:
+         node-version: '18'
+     - name: Install dependencies
+       run: npm install
+     - name: Run tests
+       run: npm test
+
+  build:
+   name: Build App
+   needs: test
+   runs-on: ubuntu-latest
+   outputs:
+    buildpath: ${{ steps.build.outputs.build_path }}
+   steps:
+     - name: Checkout code
+       uses: actions/checkout@v3
+
+     - name: Setup node.js
+       uses: actions/setup-node@v3
+       with:
+        node-version: '18'
+
+     - name: Install dependencies
+       run: npm install
+
+     - name: Build app
+       id: build
+       run: |
+          npm run build
+          echo "build_path=dist/" >> $GITHUB_OUTPUT
+
+  deploy:
+   name:  Deploy app
+   needs: build
+   if: github.ref =='refs/heads/main'
+   runs-on: ubuntu-latest
+   environment: ${{ github.event.inputs.deploy_env }}
+   steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+       node-version: '18'
+
+    - name: Deploy to ${{ github.event.inputs.deploy_env }}
+      env:
+       USERNAME: ${{ vars.USERNAME }}
+       PASSWORD: ${{ secrets.PASSWORD }}
+       DEPLOY_ENV: $ {{ github.event.inputs.deploy_env }}
+       BUILD_PATH: $ {{ needs.build.outputs.build_path }}
+      run: |
+       echo "Using username: ${USERNAME}"
+       echo "Using secrets: ${PASSWORD}"
+       echo "Deloying to environment: ${DEPLOY_ENV} "
+       echo "Deploying from build path: ${BUILD_PATH} "
