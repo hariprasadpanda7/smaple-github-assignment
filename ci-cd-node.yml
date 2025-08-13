@@ -1,0 +1,183 @@
+name: CI/CD • Node.js (Multi-Platform)
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy after build?"
+        required: false
+        default: false
+        type: boolean
+      target_env:
+        description: "Deploy environment"
+        required: false
+        default: "production"
+        type: choice
+        options: ["staging", "production"]
+      node_version:
+        description: "Node.js version"
+        required: false
+        default: "20.x"
+      build_cmd:
+        description: "Build command"
+        required: false
+        default: "npm run build"
+      build_dir:
+        description: "Directory to deploy (after build)"
+        required: false
+        default: "dist"
+
+permissions:
+  contents: read
+
+env:
+  APP_NAME: simple-nodejs-app
+  NODE_VERSION: ${{ inputs.node_version || '20.x' }}
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+        env:
+          CI: "true"
+
+  build:
+    name: Build (after tests)
+    runs-on: ubuntu-latest
+    needs: test
+
+    outputs:
+      artifact-name: ${{ steps.package.outputs.artifact_name }}
+      build-path: ${{ steps.package.outputs.build_path }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build
+        run: ${{ inputs.build_cmd }}
+
+      - name: Resolve build path + package
+        id: package
+        shell: bash
+        run: |
+          CANDIDATES=("${{ inputs.build_dir }}" "dist" "build" ".")
+          BUILD_PATH=""
+          for d in "${CANDIDATES[@]}"; do
+            if [ -d "$d" ] || [ -f "$d/package.json" ]; then
+              BUILD_PATH="$d"
+              break
+            fi
+          done
+          if [ -z "$BUILD_PATH" ]; then
+            echo "Could not determine build output. Set workflow input 'build_dir'." >&2
+            exit 1
+          fi
+
+          ARTIFACT_NAME="${{ env.APP_NAME }}-build-${{ github.run_number }}"
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          echo "build_path=$BUILD_PATH"      >> "$GITHUB_OUTPUT"
+
+          echo "Packaging $BUILD_PATH as $ARTIFACT_NAME…"
+          tar -czf "$ARTIFACT_NAME.tgz" "$BUILD_PATH"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ steps.package.outputs.artifact_name }}.tgz
+          retention-days: 7
+
+  deploy:
+    name: Deploy (manual + gated)
+    runs-on: ubuntu-latest
+    needs: build
+
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.deploy == true
+
+    environment:
+      name: ${{ inputs.target_env }}
+      url: ${{ steps.deploy.outputs.deploy_url }}
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+          path: ./artifact
+
+      - name: Show contents
+        run: ls -la ./artifact
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Unpack artifact
+        run: |
+          mkdir -p deploy
+          tar -xzf ./artifact/*.tgz -C deploy
+
+      - name: Deploy over SSH (rsync)
+        run: |
+          rsync -avz --delete deploy/ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/"
+
+      - name: Post-deploy check (optional curl to health endpoint)
+        id: health
+        env:
+          HEALTH_URL: ${{ secrets.HEALTH_URL }}
+        run: |
+          if [ -n "$HEALTH_URL" ]; then
+            echo "Checking $HEALTH_URL"
+            curl -fL "$HEALTH_URL" >/dev/null
+          fi
+
+      - name: Set environment URL
+        id: deploy
+        run: |
+          echo "deploy_url=https://${{ secrets.DEPLOY_HOST }}" >> "$GITHUB_OUTPUT"
