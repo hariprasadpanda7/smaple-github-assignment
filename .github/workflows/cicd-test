@@ -82,4 +82,3 @@ jobs:
        echo "Using secrets: ${PASSWORD}"
        echo "Deloying to environment: ${DEPLOY_ENV} "
        echo "Deploying from build path: ${BUILD_PATH} "
-
